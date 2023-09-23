@@ -1,8 +1,9 @@
-/target
-node_modules
+dist/
 out/
+target/
+node_modules/
+
 .pnpm-debug.log
 *.ast 
 *.nrs
-dist/
 *.vsix

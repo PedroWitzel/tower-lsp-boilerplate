@@ -30,6 +30,12 @@
 			"problemMatcher": [
 				"$tsc-watch"
 			]
+		},
+		{
+			"type": "cargo",
+			"command": "build",
+			"isBackground": true,
+			"group": "build",
 		}
 	]
 }

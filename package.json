@@ -1,6 +1,6 @@
 {
-  "name": "nrs-language-server",
-  "description": "nano rust language server",
+  "name": "generic-language-server",
+  "description": "generic language server",
   "license": "MIT",
   "version": "1.5.0",
   "categories": [],
@@ -12,27 +12,27 @@
     "url": "https://github.com/IWANABETHATGUY/tower-lsp-boilerplate"
   },
   "engines": {
-    "vscode": "^1.66.0"
+    "vscode": "^1.83.0"
   },
   "enabledApiProposals": [],
   "activationEvents": [
-    "onLanguage:nrs"
+    "onLanguage:gen"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "languages": [
       {
-        "id": "nrs",
+        "id": "gen",
         "extensions": [
-          ".nrs"
+          ".gen"
         ]
       }
     ],
     "configuration": {
       "type": "object",
-      "title": "nrs-language-server",
+      "title": "generic-language-server",
       "properties": {
-        "nrs-language-server.trace.server": {
+        "generic-language-server.trace.server": {
           "type": "string",
           "scope": "window",
           "enum": [
@@ -49,7 +49,13 @@
           "description": "Traces the communication between VS Code and the language server."
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "helloworld.helloWorld",
+        "title": "Say Hello"
+      }
+    ]
   },
   "scripts": {
     "postinstall": "cd client && pnpm i",
@@ -57,35 +63,41 @@
     "esbuild-base": "esbuild ./client/src/extension.ts --bundle --outfile=out/main.js --external:vscode --format=cjs --platform=node",
     "esbuild": "npm run esbuild-base -- --sourcemap",
     "esbuild-watch": "npm run esbuild-base -- --sourcemap --watch",
-    "test-compile": "tsc -p ./",
-    "compile": "cross-env NODE_ENV=production tsc -b",
-    "watch": "rm -rf dist && tsc -b -w",
-    "lint": "eslint src --ext ts",
-    "pretest": "npm run compile && npm run lint",
-    "test": "node ./out/test/runTest.js",
+    "test-compile": "cargo check && tsc -p ./",
+    "compile": "cargo build && cross-env NODE_ENV=production tsc -b",
+    "watch": "cargo build && rm -rf dist && tsc -b -w",
+    "lint": "eslint ./client/src --ext ts",
+    "lint-fix": "eslint ./client/src --ext ts --fix",
+    "pretest": "cargo build && npm run compile && npm run lint",
     "build": "webpack --config webpack.config.js",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies"
   },
   "devDependencies": {
-    "@types/glob": "^7.1.3",
-    "@types/mocha": "^8.0.0",
-    "@types/node": "^12.12.0",
-    "@types/vscode": "^1.44.0",
-    "@typescript-eslint/eslint-plugin": "^3.8.0",
-    "@typescript-eslint/parser": "^3.8.0",
-    "cross-env": "^7.0.2",
-    "electron-rebuild": "^1.11.0",
-    "esbuild": "^0.15.10",
-    "eslint": "^7.6.0",
-    "glob": "^7.1.7",
-    "mocha": "^8.0.1",
-    "typescript": "^4.4.3",
-    "vscode-test": "^1.4.0",
-    "vscode-uri": "^3.0.2",
-    "webpack": "^5.82.1"
+    "@electron/rebuild": "^3.3.0",
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.2",
+    "@types/node": "^20.8.3",
+    "@types/vscode": "^1.83.0",
+    "@vscode/test-electron": "^2.3.5",
+    "@vscode/vsce": "^2.21.1",
+    "cross-env": "^7.0.3",
+    "esbuild": "^0.19.4",
+    "eslint": "^8.51.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.2.0",
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.2.2",
+    "vscode-uri": "^3.0.8",
+    "webpack": "^5.88.2",
+    "webpack-cli": "^5.1.4"
   },
   "dependencies": {
-    "vscode-languageclient": "^8.0.2"
+    "vscode-languageclient": "^9.0.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "semver@>=7.0.0 <7.5.2": ">=7.5.2"
+    }
   }
 }

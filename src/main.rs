@@ -1,45 +1,55 @@
-use std::collections::HashMap;
-
-use dashmap::DashMap;
-use nrs_language_server::chumsky::{parse, type_inference, Func, ImCompleteSemanticToken};
-use nrs_language_server::completion::completion;
-use nrs_language_server::jump_definition::get_definition;
-use nrs_language_server::reference::get_reference;
-use nrs_language_server::semantic_token::{semantic_token_from_ast, LEGEND_TYPE};
-use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::notification::Notification;
+use tower_lsp::lsp_types::ServerInfo;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+
+const LEGEND_TYPE: &[SemanticTokenType] = &[
+    SemanticTokenType::FUNCTION,
+    SemanticTokenType::VARIABLE,
+    SemanticTokenType::STRING,
+    SemanticTokenType::COMMENT,
+    SemanticTokenType::NUMBER,
+    SemanticTokenType::KEYWORD,
+    SemanticTokenType::OPERATOR,
+    SemanticTokenType::PARAMETER,
+];
+
+/// Definition of the server
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    ast_map: DashMap<String, HashMap<String, Func>>,
-    document_map: DashMap<String, Rope>,
-    semantic_token_map: DashMap<String, Vec<ImCompleteSemanticToken>>,
 }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
-            server_info: None,
+            server_info: Some(ServerInfo {
+                name: "Generic language server".to_string(),
+                version: Some("0.0.1".to_string()),
+            }),
+
             offset_encoding: None,
+
             capabilities: ServerCapabilities {
-                inlay_hint_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    // TextDocumentSyncKind::NONE
+                    TextDocumentSyncKind::INCREMENTAL,
+                    // TextDocumentSyncKind::FULL,
                 )),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec![".".to_string()]),
+                    trigger_characters: Some(vec![".".to_string(), " ".to_string()]),
                     work_done_progress_options: Default::default(),
                     all_commit_characters: None,
                     completion_item: None,
                 }),
                 execute_command_provider: Some(ExecuteCommandOptions {
+                    // TODO - how this works?
                     commands: vec!["dummy.do_something".to_string()],
                     work_done_progress_options: Default::default(),
                 }),
@@ -51,134 +61,180 @@ impl LanguageServer for Backend {
                     }),
                     file_operations: None,
                 }),
+
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
                         SemanticTokensRegistrationOptions {
                             text_document_registration_options: {
                                 TextDocumentRegistrationOptions {
                                     document_selector: Some(vec![DocumentFilter {
-                                        language: Some("nrs".to_string()),
+                                        language: Some("gen".to_string()),
                                         scheme: Some("file".to_string()),
-                                        pattern: None,
+                                        pattern: Some("*.gen".to_string()),
                                     }]),
                                 }
                             },
                             semantic_tokens_options: SemanticTokensOptions {
-                                work_done_progress_options: WorkDoneProgressOptions::default(),
                                 legend: SemanticTokensLegend {
                                     token_types: LEGEND_TYPE.into(),
                                     token_modifiers: vec![],
                                 },
                                 range: Some(true),
                                 full: Some(SemanticTokensFullOptions::Bool(true)),
+                                work_done_progress_options: WorkDoneProgressOptions::default(),
                             },
                             static_registration_options: StaticRegistrationOptions::default(),
                         },
                     ),
                 ),
-                // definition: Some(GotoCapability::default()),
+
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
     }
+
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "initialized!")
+            .log_message(MessageType::INFO, "Server initialized")
             .await;
     }
 
     async fn shutdown(&self) -> Result<()> {
+        self.client
+            .log_message(MessageType::INFO, "Server shutdown")
+            .await;
         Ok(())
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         self.client
-            .log_message(MessageType::INFO, "file opened!")
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "{} file opened with version {}",
+                    params.text_document.uri, params.text_document.version
+                ),
+            )
             .await;
-        self.on_change(TextDocumentItem {
+
+        self.run_diagnostics(TextDocumentItem {
             uri: params.text_document.uri,
-            text: params.text_document.text,
             version: params.text_document.version,
         })
-        .await
+        .await;
     }
 
-    async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
-        self.on_change(TextDocumentItem {
-            uri: params.text_document.uri,
-            text: std::mem::take(&mut params.content_changes[0].text),
-            version: params.text_document.version,
-        })
-        .await
-    }
-
-    async fn did_save(&self, _: DidSaveTextDocumentParams) {
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
         self.client
-            .log_message(MessageType::INFO, "file saved!")
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "{} file changes with version {}\nChanges:\n{}",
+                    params.text_document.uri,
+                    params.text_document.version,
+                    params
+                        .content_changes
+                        .iter()
+                        .map(|c| format!(
+                            "From {:?} to {:?} -> {}",
+                            c.range.unwrap().start,
+                            c.range.unwrap().end,
+                            c.text
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            )
             .await;
     }
-    async fn did_close(&self, _: DidCloseTextDocumentParams) {
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
         self.client
-            .log_message(MessageType::INFO, "file closed!")
+            .log_message(
+                MessageType::INFO,
+                format!("{} file saved", params.text_document.uri),
+            )
+            .await;
+
+        if let Some(text) = params.text {
+            self.client
+                .log_message(MessageType::INFO, format!("With new text:\n{}", text))
+                .await;
+            self.run_diagnostics(TextDocumentItem {
+                uri: params.text_document.uri,
+                version: 0,
+            })
+            .await;
+        };
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("{} file closed", params.text_document.uri),
+            )
             .await;
     }
 
+    /// Gets a file and location of an element
+    /// Returns the file and localtion where it was defined
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
         let definition = async {
+            // Get the path of the file that was modified
             let uri = params.text_document_position_params.text_document.uri;
-            let ast = self.ast_map.get(uri.as_str())?;
-            let rope = self.document_map.get(uri.as_str())?;
 
-            let position = params.text_document_position_params.position;
-            let char = rope.try_line_to_char(position.line as usize).ok()?;
-            let offset = char + position.character as usize;
-            // self.client.log_message(MessageType::INFO, &format!("{:#?}, {}", ast.value(), offset)).await;
-            let span = get_definition(&ast, offset);
+            // Get origin location that triggered the event
+            let range = Range::new(
+                params.text_document_position_params.position,
+                params.text_document_position_params.position,
+            );
+
             self.client
-                .log_message(MessageType::INFO, &format!("{:?}, ", span))
+                .log_message(
+                    MessageType::INFO,
+                    format!(
+                        "{} file trigers GoToDefinition from: {:?}",
+                        uri, params.text_document_position_params.position
+                    ),
+                )
                 .await;
-            span.and_then(|(_, range)| {
-                let start_position = offset_to_position(range.start, &rope)?;
-                let end_position = offset_to_position(range.end, &rope)?;
 
-                let range = Range::new(start_position, end_position);
-
-                Some(GotoDefinitionResponse::Scalar(Location::new(uri, range)))
-            })
+            // Find out where it's defind and retour its location (sending same as exemple)
+            Some(GotoDefinitionResponse::Scalar(Location::new(uri, range)))
         }
         .await;
         Ok(definition)
     }
+
+    /// Gets an element to look for its references, it has a flag saying if the declarion is included
+    /// Returns a list of positions where this elements is referenced
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        let reference_list = || -> Option<Vec<Location>> {
-            let uri = params.text_document_position.text_document.uri;
-            let ast = self.ast_map.get(&uri.to_string())?;
-            let rope = self.document_map.get(&uri.to_string())?;
+        let uri = params.text_document_position.text_document.uri;
+        let range = Range::new(
+            params.text_document_position.position,
+            params.text_document_position.position,
+        );
 
-            let position = params.text_document_position.position;
-            let char = rope.try_line_to_char(position.line as usize).ok()?;
-            let offset = char + position.character as usize;
-            let reference_list = get_reference(&ast, offset, false);
-            let ret = reference_list
-                .into_iter()
-                .filter_map(|(_, range)| {
-                    let start_position = offset_to_position(range.start, &rope)?;
-                    let end_position = offset_to_position(range.end, &rope)?;
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "{} file trigers GoToDefinition from: {:?}",
+                    uri, params.text_document_position.position
+                ),
+            )
+            .await;
 
-                    let range = Range::new(start_position, end_position);
-
-                    Some(Location::new(uri.clone(), range))
-                })
-                .collect::<Vec<_>>();
-            Some(ret)
-        }();
-        Ok(reference_list)
+        Ok(Some(vec![Location::new(uri, range)]))
     }
 
     async fn semantic_tokens_full(
@@ -187,272 +243,101 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri.to_string();
         self.client
-            .log_message(MessageType::LOG, "semantic_token_full")
+            .log_message(MessageType::LOG, format!("{} Semantic tokens full", uri))
             .await;
-        let semantic_tokens = || -> Option<Vec<SemanticToken>> {
-            let mut im_complete_tokens = self.semantic_token_map.get_mut(&uri)?;
-            let rope = self.document_map.get(&uri)?;
-            let ast = self.ast_map.get(&uri)?;
-            let extends_tokens = semantic_token_from_ast(&ast);
-            im_complete_tokens.extend(extends_tokens);
-            im_complete_tokens.sort_by(|a, b| a.start.cmp(&b.start));
-            let mut pre_line = 0;
-            let mut pre_start = 0;
-            let semantic_tokens = im_complete_tokens
-                .iter()
-                .filter_map(|token| {
-                    let line = rope.try_byte_to_line(token.start).ok()? as u32;
-                    let first = rope.try_line_to_char(line as usize).ok()? as u32;
-                    let start = rope.try_byte_to_char(token.start).ok()? as u32 - first;
-                    let delta_line = line - pre_line;
-                    let delta_start = if delta_line == 0 {
-                        start - pre_start
-                    } else {
-                        start
-                    };
-                    let ret = Some(SemanticToken {
-                        delta_line,
-                        delta_start,
-                        length: token.length as u32,
-                        token_type: token.token_type as u32,
-                        token_modifiers_bitset: 0,
-                    });
-                    pre_line = line;
-                    pre_start = start;
-                    ret
-                })
-                .collect::<Vec<_>>();
-            Some(semantic_tokens)
-        }();
-        if let Some(semantic_token) = semantic_tokens {
-            return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-                result_id: None,
-                data: semantic_token,
-            })));
-        }
         Ok(None)
     }
 
     async fn semantic_tokens_range(
         &self,
-        params: SemanticTokensRangeParams,
+        _params: SemanticTokensRangeParams,
     ) -> Result<Option<SemanticTokensRangeResult>> {
-        let uri = params.text_document.uri.to_string();
-        let semantic_tokens = || -> Option<Vec<SemanticToken>> {
-            let im_complete_tokens = self.semantic_token_map.get(&uri)?;
-            let rope = self.document_map.get(&uri)?;
-            let mut pre_line = 0;
-            let mut pre_start = 0;
-            let semantic_tokens = im_complete_tokens
-                .iter()
-                .filter_map(|token| {
-                    let line = rope.try_byte_to_line(token.start).ok()? as u32;
-                    let first = rope.try_line_to_char(line as usize).ok()? as u32;
-                    let start = rope.try_byte_to_char(token.start).ok()? as u32 - first;
-                    let ret = Some(SemanticToken {
-                        delta_line: line - pre_line,
-                        delta_start: if start >= pre_start {
-                            start - pre_start
-                        } else {
-                            start
-                        },
-                        length: token.length as u32,
-                        token_type: token.token_type as u32,
-                        token_modifiers_bitset: 0,
-                    });
-                    pre_line = line;
-                    pre_start = start;
-                    ret
-                })
-                .collect::<Vec<_>>();
-            Some(semantic_tokens)
-        }();
-        if let Some(semantic_token) = semantic_tokens {
-            return Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
-                result_id: None,
-                data: semantic_token,
-            })));
-        }
         Ok(None)
     }
 
     async fn inlay_hint(
         &self,
-        params: tower_lsp::lsp_types::InlayHintParams,
+        _params: tower_lsp::lsp_types::InlayHintParams,
     ) -> Result<Option<Vec<InlayHint>>> {
         self.client
             .log_message(MessageType::INFO, "inlay hint")
             .await;
-        let uri = &params.text_document.uri;
-        let mut hashmap = HashMap::new();
-        if let Some(ast) = self.ast_map.get(uri.as_str()) {
-            ast.iter().for_each(|(_, v)| {
-                type_inference(&v.body, &mut hashmap);
-            });
-        }
-
-        let document = match self.document_map.get(uri.as_str()) {
-            Some(rope) => rope,
-            None => return Ok(None),
-        };
-        let inlay_hint_list = hashmap
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k.start,
-                    k.end,
-                    match v {
-                        nrs_language_server::chumsky::Value::Null => "null".to_string(),
-                        nrs_language_server::chumsky::Value::Bool(_) => "bool".to_string(),
-                        nrs_language_server::chumsky::Value::Num(_) => "number".to_string(),
-                        nrs_language_server::chumsky::Value::Str(_) => "string".to_string(),
-                        nrs_language_server::chumsky::Value::List(_) => "[]".to_string(),
-                        nrs_language_server::chumsky::Value::Func(_) => v.to_string(),
-                    },
-                )
-            })
-            .filter_map(|item| {
-                // let start_position = offset_to_position(item.0, document)?;
-                let end_position = offset_to_position(item.1, &document)?;
-                let inlay_hint = InlayHint {
-                    text_edits: None,
-                    tooltip: None,
-                    kind: Some(InlayHintKind::TYPE),
-                    padding_left: None,
-                    padding_right: None,
-                    data: None,
-                    position: end_position,
-                    label: InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
-                        value: item.2,
-                        tooltip: None,
-                        location: Some(Location {
-                            uri: params.text_document.uri.clone(),
-                            range: Range {
-                                start: Position::new(0, 4),
-                                end: Position::new(0, 5),
-                            },
-                        }),
-                        command: None,
-                    }]),
-                };
-                Some(inlay_hint)
-            })
-            .collect::<Vec<_>>();
-
-        Ok(Some(inlay_hint_list))
+        Ok(None)
     }
 
-    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let uri = params.text_document_position.text_document.uri;
-        let position = params.text_document_position.position;
-        let completions = || -> Option<Vec<CompletionItem>> {
-            let rope = self.document_map.get(&uri.to_string())?;
-            let ast = self.ast_map.get(&uri.to_string())?;
-            let char = rope.try_line_to_char(position.line as usize).ok()?;
-            let offset = char + position.character as usize;
-            let completions = completion(&ast, offset);
-            let mut ret = Vec::with_capacity(completions.len());
-            for (_, item) in completions {
-                match item {
-                    nrs_language_server::completion::ImCompleteCompletionItem::Variable(var) => {
-                        ret.push(CompletionItem {
-                            label: var.clone(),
-                            insert_text: Some(var.clone()),
-                            kind: Some(CompletionItemKind::VARIABLE),
-                            detail: Some(var),
-                            ..Default::default()
-                        });
-                    }
-                    nrs_language_server::completion::ImCompleteCompletionItem::Function(
-                        name,
-                        args,
-                    ) => {
-                        ret.push(CompletionItem {
-                            label: name.clone(),
-                            kind: Some(CompletionItemKind::FUNCTION),
-                            detail: Some(name.clone()),
-                            insert_text: Some(format!(
-                                "{}({})",
-                                name,
-                                args.iter()
-                                    .enumerate()
-                                    .map(|(index, item)| { format!("${{{}:{}}}", index + 1, item) })
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            )),
-                            insert_text_format: Some(InsertTextFormat::SNIPPET),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-            Some(ret)
-        }();
-        Ok(completions.map(CompletionResponse::Array))
+    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        Ok(None)
     }
 
-    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        let workspace_edit = || -> Option<WorkspaceEdit> {
-            let uri = params.text_document_position.text_document.uri;
-            let ast = self.ast_map.get(&uri.to_string())?;
-            let rope = self.document_map.get(&uri.to_string())?;
+    async fn rename(&self, _params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        Ok(None)
+    }
 
-            let position = params.text_document_position.position;
-            let char = rope.try_line_to_char(position.line as usize).ok()?;
-            let offset = char + position.character as usize;
-            let reference_list = get_reference(&ast, offset, true);
-            let new_name = params.new_name;
-            if !reference_list.is_empty() {
-                let edit_list = reference_list
-                    .into_iter()
-                    .filter_map(|(_, range)| {
-                        let start_position = offset_to_position(range.start, &rope)?;
-                        let end_position = offset_to_position(range.end, &rope)?;
-                        Some(TextEdit::new(
-                            Range::new(start_position, end_position),
-                            new_name.clone(),
-                        ))
-                    })
-                    .collect::<Vec<_>>();
-                let mut map = HashMap::new();
-                map.insert(uri, edit_list);
-                let workspace_edit = WorkspaceEdit::new(map);
-                Some(workspace_edit)
-            } else {
-                None
-            }
-        }();
-        Ok(workspace_edit)
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "{} requested formatting with: {:?}",
+                    params.text_document.uri, params.options
+                ),
+            )
+            .await;
+        Ok(None)
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "{} requested range formatting with: {:?}",
+                    params.text_document.uri, params.options
+                ),
+            )
+            .await;
+        Ok(None)
     }
 
     async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {
         self.client
-            .log_message(MessageType::INFO, "configuration changed!")
+            .log_message(MessageType::INFO, "configuration changed")
             .await;
     }
 
     async fn did_change_workspace_folders(&self, _: DidChangeWorkspaceFoldersParams) {
         self.client
-            .log_message(MessageType::INFO, "workspace folders changed!")
+            .log_message(MessageType::INFO, "workspace folders changed")
             .await;
     }
 
-    async fn did_change_watched_files(&self, _: DidChangeWatchedFilesParams) {
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         self.client
-            .log_message(MessageType::INFO, "watched files have changed!")
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "Watched files have changed:\n{}",
+                    params
+                        .changes
+                        .iter()
+                        .map(|w| format!("{:?} - {}", w.typ, w.uri))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            )
             .await;
     }
 
-    async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<Value>> {
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
         self.client
-            .log_message(MessageType::INFO, "command executed!")
+            .log_message(
+                MessageType::INFO,
+                format!("{} command executed", params.command),
+            )
             .await;
-
-        match self.client.apply_edit(WorkspaceEdit::default()).await {
-            Ok(res) if res.applied => self.client.log_message(MessageType::INFO, "applied").await,
-            Ok(_) => self.client.log_message(MessageType::INFO, "rejected").await,
-            Err(err) => self.client.log_message(MessageType::ERROR, err).await,
-        }
 
         Ok(None)
     }
@@ -469,80 +354,19 @@ impl Notification for CustomNotification {
 }
 struct TextDocumentItem {
     uri: Url,
-    text: String,
     version: i32,
 }
 impl Backend {
-    async fn on_change(&self, params: TextDocumentItem) {
-        let rope = ropey::Rope::from_str(&params.text);
-        self.document_map
-            .insert(params.uri.to_string(), rope.clone());
-        let (ast, errors, semantic_tokens) = parse(&params.text);
-        // self.client
-        //     .log_message(MessageType::INFO, format!("{:?}", errors))
-        //     .await;
-        let diagnostics = errors
-            .into_iter()
-            .filter_map(|item| {
-                let (message, span) = match item.reason() {
-                    chumsky::error::SimpleReason::Unclosed { span, delimiter } => {
-                        (format!("Unclosed delimiter {}", delimiter), span.clone())
-                    }
-                    chumsky::error::SimpleReason::Unexpected => (
-                        format!(
-                            "{}, expected {}",
-                            if item.found().is_some() {
-                                "Unexpected token in input"
-                            } else {
-                                "Unexpected end of input"
-                            },
-                            if item.expected().len() == 0 {
-                                "something else".to_string()
-                            } else {
-                                item.expected()
-                                    .map(|expected| match expected {
-                                        Some(expected) => expected.to_string(),
-                                        None => "end of input".to_string(),
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            }
-                        ),
-                        item.span(),
-                    ),
-                    chumsky::error::SimpleReason::Custom(msg) => (msg.to_string(), item.span()),
-                };
-
-                
-                || -> Option<Diagnostic> {
-                    // let start_line = rope.try_char_to_line(span.start)?;
-                    // let first_char = rope.try_line_to_char(start_line)?;
-                    // let start_column = span.start - first_char;
-                    let start_position = offset_to_position(span.start, &rope)?;
-                    let end_position = offset_to_position(span.end, &rope)?;
-                    // let end_line = rope.try_char_to_line(span.end)?;
-                    // let first_char = rope.try_line_to_char(end_line)?;
-                    // let end_column = span.end - first_char;
-                    Some(Diagnostic::new_simple(
-                        Range::new(start_position, end_position),
-                        message,
-                    ))
-                }()
-            })
-            .collect::<Vec<_>>();
+    async fn run_diagnostics(&self, params: TextDocumentItem) {
+        let pos = Position::new(0, 0);
+        let diagnostics = vec![Diagnostic::new_simple(
+            Range::new(pos, pos),
+            "error".to_string(),
+        )];
 
         self.client
             .publish_diagnostics(params.uri.clone(), diagnostics, Some(params.version))
             .await;
-
-        if let Some(ast) = ast {
-            self.ast_map.insert(params.uri.to_string(), ast);
-        }
-        // self.client
-        //     .log_message(MessageType::INFO, &format!("{:?}", semantic_tokens))
-        //     .await;
-        self.semantic_token_map
-            .insert(params.uri.to_string(), semantic_tokens);
     }
 }
 
@@ -553,21 +377,7 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::build(|client| Backend {
-        client,
-        ast_map: DashMap::new(),
-        document_map: DashMap::new(),
-        semantic_token_map: DashMap::new(),
-    })
-    .finish();
+    let (service, socket) = LspService::build(|client| Backend { client }).finish();
 
-    serde_json::json!({"test": 20});
     Server::new(stdin, stdout, socket).serve(service).await;
-}
-
-fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
-    let line = rope.try_char_to_line(offset).ok()?;
-    let first_char_of_line = rope.try_line_to_char(line).ok()?;
-    let column = offset - first_char_of_line;
-    Some(Position::new(line as u32, column as u32))
 }
